@@ -1,9 +1,10 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   BarChart3, Users, Zap, Building2, ArrowRight,
   ChevronRight, ChevronLeft, TrendingUp, TrendingDown, Minus,
   CheckCircle2, AlertTriangle, XCircle, Star, Mail, ExternalLink, Target,
 } from "lucide-react";
+import { saveAssessment, getAssessment } from "@/lib/assessmentService";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -388,6 +389,11 @@ export default function App() {
   const [orgName, setOrgName] = useState("");
   const [respondentName, setRespondentName] = useState("");
   const [email, setEmail] = useState("");
+  const [savedId, setSavedId] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingId, setLoadingId] = useState("");
+  const savedRef = useRef(false);
 
   const setAnswer = (pIdx: number, dIdx: number, qi: number, val: number) =>
     setAnswers((prev) => ({ ...prev, [qId(pIdx, dIdx, qi)]: val }));
@@ -427,9 +433,67 @@ export default function App() {
     0
   );
 
-  const resetAll = () => { setAnswers({}); setOrgName(""); setRespondentName(""); setEmail(""); setView("landing"); };
+  const resetAll = () => { setAnswers({}); setOrgName(""); setRespondentName(""); setEmail(""); setSavedId(null); setLoadError(null); savedRef.current = false; setView("landing"); };
 
-  if (view === "landing") return <LandingPage onStart={() => setView("intro")} />;
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    if (id) {
+      getAssessment(id).then((record) => {
+        if (record) {
+          setOrgName(record.organization_name);
+          setRespondentName(record.respondent_name);
+          setEmail(record.respondent_email);
+          setAnswers(record.answers);
+          setSavedId(record.id);
+          setView("results");
+        } else {
+          setLoadError("Assessment not found. The link may be invalid.");
+        }
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (view !== "results" || savedRef.current) return;
+    savedRef.current = true;
+    const analysis = generateAnalysis(orgName, overallScore, scores);
+    setSaving(true);
+    saveAssessment({
+      respondent_name: respondentName,
+      respondent_email: email,
+      organization_name: orgName,
+      answers,
+      scores,
+      analysis,
+    })
+      .then((id) => setSavedId(id))
+      .catch(() => {})
+      .finally(() => setSaving(false));
+  }, [view]);
+
+  if (view === "landing") return (
+    <LandingPage
+      onStart={() => setView("intro")}
+      loadError={loadError}
+      loadingId={loadingId}
+      onLoadIdChange={setLoadingId}
+      onLoadSubmit={async () => {
+        setLoadError(null);
+        const record = await getAssessment(loadingId);
+        if (record) {
+          setOrgName(record.organization_name);
+          setRespondentName(record.respondent_name);
+          setEmail(record.respondent_email);
+          setAnswers(record.answers);
+          setSavedId(record.id);
+          setView("results");
+        } else {
+          setLoadError("Assessment not found. Check the ID and try again.");
+        }
+      }}
+    />
+  );
 
   // ── Setup ──────────────────────────────────────────────────────────────────
   if (view === "intro") {
@@ -647,6 +711,34 @@ export default function App() {
               <p className="font-mono text-xs text-muted-foreground mt-0.5">{overallScore.toFixed(2)} / 5.00</p>
             </div>
           </div>
+
+          {/* Save indicator */}
+          {saving && (
+            <div className="mb-8 flex items-center gap-2 text-xs text-muted-foreground">
+              <div className="w-3 h-3 rounded-full border border-current border-t-transparent animate-spin" />
+              Saving your results...
+            </div>
+          )}
+          {savedId && (
+            <div className="mb-8 bg-card border border-border rounded-sm p-4 flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground mb-1">Results saved — use this link to view later:</p>
+                <p className="font-mono text-xs text-foreground/80 truncate select-all">
+                  {window.location.origin}{window.location.pathname}?id={savedId}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(
+                    `${window.location.origin}${window.location.pathname}?id=${savedId}`
+                  )
+                }}
+                className="flex-shrink-0 text-xs text-primary hover:opacity-80 transition-opacity font-medium"
+              >
+                Copy Link
+              </button>
+            </div>
+          )}
 
           {/* Executive Summary */}
           <div className="mb-12">
@@ -930,7 +1022,13 @@ export default function App() {
 
 // ─── Landing Page ─────────────────────────────────────────────────────────────
 
-function LandingPage({ onStart }: { onStart: () => void }) {
+function LandingPage({ onStart, loadError, loadingId, onLoadIdChange, onLoadSubmit }: {
+  onStart: () => void;
+  loadError: string | null;
+  loadingId: string;
+  onLoadIdChange: (v: string) => void;
+  onLoadSubmit: () => void;
+}) {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <nav className="border-b border-border">
@@ -941,9 +1039,37 @@ function LandingPage({ onStart }: { onStart: () => void }) {
             </div>
             <span className="font-serif text-lg tracking-tight">OrgDiagnostic</span>
           </div>
-          <button onClick={onStart} className="bg-primary text-primary-foreground px-5 py-2 rounded-sm text-sm font-medium hover:opacity-90 transition-opacity">
-            Begin Assessment
-          </button>
+          <div className="flex items-center gap-4">
+            <details className="relative group">
+              <summary className="text-xs text-muted-foreground hover:text-foreground cursor-pointer transition-colors list-none">
+                View Saved Results
+              </summary>
+              <div className="absolute right-0 top-8 w-80 bg-card border border-border rounded-sm p-4 shadow-lg z-50">
+                <p className="text-xs text-muted-foreground mb-2">Enter your assessment ID:</p>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={loadingId}
+                    onChange={(e) => onLoadIdChange(e.target.value)}
+                    placeholder="Paste assessment ID..."
+                    className="flex-1 bg-background border border-border rounded-sm px-3 py-2 text-xs text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-1 focus:ring-primary/60"
+                    onKeyDown={(e) => e.key === "Enter" && onLoadSubmit()}
+                  />
+                  <button
+                    onClick={onLoadSubmit}
+                    disabled={!loadingId.trim()}
+                    className="bg-primary text-primary-foreground px-3 py-2 rounded-sm text-xs font-medium hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity flex-shrink-0"
+                  >
+                    Load
+                  </button>
+                </div>
+                {loadError && <p className="text-xs text-red-500 mt-2">{loadError}</p>}
+              </div>
+            </details>
+            <button onClick={onStart} className="bg-primary text-primary-foreground px-5 py-2 rounded-sm text-sm font-medium hover:opacity-90 transition-opacity">
+              Begin Assessment
+            </button>
+          </div>
         </div>
       </nav>
 
